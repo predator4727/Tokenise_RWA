@@ -28,6 +28,7 @@ contract dTSLA is ConfirmedOwner, FunctionsClient, ERC20 {
     string private s_mintSourceCode;
     string private s_redeemSourceCode;
     uint256 private s_portfolioBalance;
+    bytes32 private s_mostRecentRequestId;
     uint256 constant PRECISION = 1e18;
     uint256 constant ADDITIONAL_FEED_PRECISION = 1e10;
     //if there is 200$ in dTSLA in the brokerage, we can mint at most 100$ of dTSLA
@@ -38,6 +39,8 @@ contract dTSLA is ConfirmedOwner, FunctionsClient, ERC20 {
     mapping(bytes32 requestId => dTslaRequest request) private s_requestIdToRequest;
     mapping(address user => uint256 pendingWithdrawalAmount) private s_userToWithdrawalAmount;
     // mapping(address token => address priceFeed) public s_priceFeeds;
+    uint8 donHostedSecretsSlotId = 0;
+    uint64 donHostedSecretVersion = 1712769962;
 
     enum MintOrRedeem {
         Mint,
@@ -66,7 +69,9 @@ contract dTSLA is ConfirmedOwner, FunctionsClient, ERC20 {
     function sendMintRequest(uint256 amountTokensToMint) external onlyOwner returns (bytes32) {
         FunctionsRequest.Request memory req;
         req.initializeRequestForInlineJavaScript(s_mintSourceCode);
+        req.addDONHostedSecrets(donHostedSecretsSlotId, donHostedSecretVersion);
         bytes32 requestId = _sendRequest(req.encodeCBOR(), s_subId, GAS_LIMIT, DON_ID);
+        s_mostRecentRequestId = requestId;
         s_requestIdToRequest[requestId] = dTslaRequest(amountTokensToMint, msg.sender, MintOrRedeem.Mint);
         return requestId;
     }
@@ -109,7 +114,7 @@ contract dTSLA is ConfirmedOwner, FunctionsClient, ERC20 {
 
         bytes32 requestId = _sendRequest(req.encodeCBOR(), s_subId, GAS_LIMIT, DON_ID);
         s_requestIdToRequest[requestId] = dTslaRequest(amountTokensToRedeem, msg.sender, MintOrRedeem.Redeem);
-
+        s_mostRecentRequestId = requestId;
         _burn(msg.sender, amountTokensToRedeem);
     }
 
@@ -134,12 +139,21 @@ contract dTSLA is ConfirmedOwner, FunctionsClient, ERC20 {
         }
     }
 
-    function fulfillRequest(bytes32 requestId, bytes memory response, bytes memory /*err*/ ) internal override {
-        if (s_requestIdToRequest[requestId].mintOrRedeem == MintOrRedeem.Mint) {
-            _mintFilfillRequest(requestId, response);
-        } else {
-            _redeemFilfillRequest(requestId, response);
+    function fulfillRequest(bytes32 /*requestId*/, bytes memory response, bytes memory /*err*/ ) internal override {
+        // if (s_requestIdToRequest[requestId].mintOrRedeem == MintOrRedeem.Mint) {
+        //     _mintFilfillRequest(requestId, response);
+        // } else {
+        //     _redeemFilfillRequest(requestId, response);
+        // }
+        s_portfolioBalance = uint256(bytes32(response));
+    }
+
+    function finishMint() external onlyOwner {
+        uint256 amountOfTokensToMint = s_requestIdToRequest[s_mostRecentRequestId].amountOfToken;
+        if (_getCollateralRatioAdjustedTotalBalance(amountOfTokensToMint) > s_portfolioBalance) {
+            revert dTSLA__NotEnoughCollateral();
         }
+        _mint(s_requestIdToRequest[s_mostRecentRequestId].requestor, amountOfTokensToMint);
     }
 
     function _getCollateralRatioAdjustedTotalBalance(uint256 amountOfTokensToMint) internal view returns (uint256) {
